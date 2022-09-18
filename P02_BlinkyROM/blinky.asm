@@ -1,4 +1,5 @@
-; Test program for 8085 SBC.  Blinks an LED on SOD forever.
+; Test program for 8085 SBC.  Blinks an LED on at PIO0-PA0 forever.
+; ROM Memory Map Version
 ; Note the first jump that seems to do nothing.  This is for the power-on jump.
 ; The ROM is normally at 8000 and the RAM at 0000.  At reset, the ROM maps to
 ; both 0000 and 8000.  This condition persists until the A15 line goes high.
@@ -12,10 +13,10 @@
 	JMP INIT	; System Init
 
 INIT:   MVI A, 0Fh  ; Set DDR on PIO0-A3..A0 to OUT
-        OUT 00h
+        OUT 80h
 
 START:  MVI A, 01h	; LED on
-        OUT 01h
+        OUT 81h
 
 ;        CALL DELAY1
         
@@ -27,8 +28,8 @@ D0PT2:  DCR B
         CPI 00h
         JNZ D0PT1
 
-        MVI A, 00h	; LED off
-        OUT 01h
+        MVI A, 00h	; LED off:q
+        OUT 81h
 
         MVI A, 0FFh	; Delay
         MOV B, A
