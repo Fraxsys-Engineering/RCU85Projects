@@ -1,10 +1,10 @@
 ## Source name, change to match the assembly filename
-NAME := blinky
+NAME := test01
 
 ## Memory region Definition
 # - Config1 : 256 bytes RAM @ 0x0000
 MEMSTART := 0000
-MEMLEN   := 0100
+MEMLEN   := 1000
 
 AS := asm85
 

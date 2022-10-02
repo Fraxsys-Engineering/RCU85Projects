@@ -3,7 +3,7 @@
 ; 
 ; Basic Function API
 ; ---
-; iob_configure
+; iob_configure - TESTED OK
 ; call args:    none.
 ; call ret:     none.
 ; desc:         Setup PIO controller for this I/O board
@@ -13,19 +13,33 @@
 ;                   PORT-C - OUTPUT/0x20 (only 6 bits)
 ;
 ; -
-; iob_user_inp
+; iob_user_inp - TESTED OK
 ; call args:    none
 ; call ret:     user octet value in 'A' reg
 ; desc:         Read the 8 user input switches 
+;
+; -
+; iob_disp_refresh - TESTED OK
+; call args:    none
+; call ret:     none
+; desc:         refresh the 4 7-seg. nibble registers from the 4 shadow
+;               registers. call this after modifying the shadow registers
+;               to update a 7-seg ASCII-NIBBLE indicator or a decimal-
+;               point indicator state.
+;               Part of the low level display controller, Version 2.0
+;               Ver. 2.0
+;               *** Refreshes the Displays ***
 ;
 ; - 
 ; iob_user_disp_raw
 ; call args:    'A'     data nibble, only uses d0..d3
 ;               'B'     nibble addr, 0..3
 ; call ret:     none.
-; desc.         Perform a low level nibble write to one of the 4 7-Seg.
-;               LED latches, latch identified in 'B'. D[0..3] of 'A'
-;               will be written to the latch. Uses no LUTs.
+; desc.         Perform a low level nibble update to one of the 4 7-Seg.
+;               nibble shadow registers, DOES NOT update the displays on
+;               the I/O Steering Controller Board! Call iob_disp_refresh()
+;               to update the 7-seg. displays on the board.
+;               Ver. 2.0
 ;
 ; -
 ; iob_user_disp_dpl (left)
@@ -34,6 +48,7 @@
 ; call ret:     none.
 ; desc.         enable or disable 7-seg LED decimal point lights w/o
 ;               affecting the remaining digits on the display.
+;               *** Refreshes the Displays ***
 ;
 ; -
 ; r_iob_user_disp_dpl (left)
@@ -74,11 +89,19 @@
 
 
 ; 256 Byte RAM Bank locations - Basic mode, no addl. RAM
-RAM_BNK0    EQU     0000H
-RAM_BNK1    EQU     1000H
-RAM_BNK2    EQU     2000H
+NVM_BANK0   EQU     0000H           ; FRAM Memory Board (NV RAM)
+RAM_BNK0    EQU     8000H           ; 8155 Bank-0
+RAM_BNK1    EQU     9000H           ; 8155 Bank-1
+RAM_BNK2    EQU     0A000H          ; 8155 Bank-2
+RAM_EXPA    EQU     7000H           ; 4K RAM - Expansion Board Rev 1.0
+STACK       EQU     RAM_BNK0+0100H  ; use all 256 bytes in PIO-2 (Bank-0)
+STCKBOT     EQU     RAM_BNK0+00FFH  ; first addr used in the stack
+STCKTOP     EQU     00H             ; LSB byte addr for top-of-stack (0xxx00) MSB same as 'STCKBOT'
+STCKVCHK    EQU     RAM_BNK0        ; Address to check for stack overflow, should remain watermarked.
 
-REG_CSR     EQU     20H
+IOSDC_BANK  EQU     0A0H    ; Location of the I/O Steering Drive Controll Board (0xA000)
+
+REG_CSR     EQU     IOSDC_BANK+0
 CSR_VAL     EQU     01001110b
                     ; 01 TIMER         HALT
                     ;  0 PortB INTR    OFF
@@ -86,20 +109,119 @@ CSR_VAL     EQU     01001110b
                     ; 11 PortC MODE    3 (All Outputs)
                     ;  1 PortB DIR     Output
                     ;  0 PortA DIR     Input
-REG_A       EQU     21H
-REG_B       EQU     22H
-REG_C       EQU     23H
-PB_VAL      EQU     02H
-PC_VAL      EQU     20H
+REG_A       EQU     IOSDC_BANK+1 ; INPUT  1-of-2 bytes values selected by PortB[0]
+REG_B       EQU     IOSDC_BANK+2 ; OUTPUT 7-seg LED display + PortA read bank select
+REG_C       EQU     IOSDC_BANK+3 ; OUTPUT steering and driver control
+PB_VAL      EQU     02H     ; PortB Init. : bit-1 should stay at '1' for the 7-seg latch LOAD pulse. select Bank-1 input (SI1)
+PC_VAL      EQU     20H     ; PortC Init.
+
+
+; =====================================================================
+; --- Testing code ----------------------------------------------------
+
+DELAYL      EQU 0FFh        ; loop "heartbeat"
+DELAYH      EQU 001h
+USRINP      EQU 9000H       ; RAM addr to cache the last userinput (tested read)
+LOOPHB      EQU 9001H       ; Heatbeat LED state (bool) [0,1]
+LOOPDL      EQU 9002H       ; Cached 16-bit delay value. (Little Endian)
+LOOPDH      EQU 9003H
+
+            ORG NVM_BANK0
+	
+            JMP MAIN	; System Init
+
+            ;ORG RAM_EXPA    ; Jump to run in the 4K RAM
+
+MAIN:       LXI SP, STACK   ; Setup the stack (!) Stack pre-decrements on a PUSH
+                            ; so the SP is initialized to 1 byte addr higher 
+                            ; than the first PUSH address location (0x20FF)
+                            ; Watermarking has to start at the next lower byte
+                            ; (0x20FF)
+            LXI H, STACK    ; watermark the stack (H,L) <--> M 0x2000..0x20FF
+SWMARK:     DCX H           ; (!) pre-decrement HL to get 1st writable address
+            MVI A, 055H
+            MOV M,A
+	        MVI A, STCKTOP
+            CMP L           ; check for L == 0x00 (0x2000)
+            JNZ SWMARK      
+
+OPTTEST:    ; --- Tests (optional)
+            ;JMP TSTIOSDC ; uncomment to skip basic tests
+            MVI A, 00H      ; Test Stack push (address decoding test + stack ops.)
+            PUSH PSW
+            LXI H, 1122H
+            PUSH H
+            INX H
+            PUSH H
+            ; restore SP
+            POP H
+            POP H
+            POP H
+            MVI A, 01H
+            PUSH PSW
+            POP PSW
+
+TSTIOSDC:   ; --- Test the I/O Steering Drive Control Board
+            CALL iob_configure  ; initialize the board via the 8155 PIA
+            MVI A,00H
+            STA LOOPHB
+            MVI A,DELAYH
+            STA LOOPDH
+            MVI A,DELAYL
+            STA LOOPDL
+            ; test read of the 8-bit user switch --> USRINP (RAM)
+LOOPRIN:    CALL iob_user_inp
+            STA USRINP
+            ; loop math
+            LHLD LOOPDL  ; HL <- (LOOPDL/16-bit)
+            DCX H
+            SHLD LOOPDL
+            MOV A,L
+            ORA H
+            JNZ looppr0
+            ; 0x0000 : flip the left Dp bit
+            LDA LOOPHB
+            XRI 08H
+            STA LOOPHB
+            CALL iob_user_disp_dpl ; update diplay cache, dp status only
+            ; reset the delay counter
+            MVI A,DELAYH
+            STA LOOPDH
+            MVI A,DELAYL
+            STA LOOPDL
+            ;; --- save user-byte into raw 7-seg shadow regs. to test them
+            ;STA disp_shd_l_abcd ; low-nibble
+            ;STA disp_shd_r_abcd ; low-nibble
+            ;RRC
+            ;RRC
+            ;RRC
+            ;RRC
+            ;STA disp_shd_l_efgp ; high-nibble
+            ;STA disp_shd_r_efgp ; high-nibble
+            ;CALL iob_disp_refresh ; update 7-Seg. LED 'bits' from the raw 4-bit shadow registers.
+looppr0:    LDA USRINP   ; get the user input back into Reg-A before the next call.
+            ; --- decode user input as a full byte and update dual 7-seg diplays with the ASCII-HEX value.
+            CALL iob_user_disp_hexbyt ; this also updates the display
+            JMP LOOPRIN
+
+
+TESTEND:    JMP TESTEND            
+
+
+
+
+; =====================================================================
 
 ; memory for shadow register copies of PortB,C on the 8155 PIO
-shdw_regb:  db  00h
-shdw_regc:  db  00h
+shdw_regb:  db  PB_VAL ; bit-1 should stay at '1' for the 7-seg latch LOAD pulse.
+shdw_regc:  db  PC_VAL
 ; PortA is an input and does not need a shadow, but this value is the
 ; last read one and allows re-use without having to re-read the port.
 shdw_rega:  db  00h
 
+; Tested - OK
 iob_configure:
+            ; Initialize the 8155 to starting values and setup port DDRs.
             PUSH PSW        ; save Reg A
             MVI A, CSR_VAL
             OUT REG_CSR
@@ -109,38 +231,25 @@ iob_configure:
             OUT REG_C
             POP PSW         ; restore Reg A
             RET
-            
+
+
+; Read the 8-bit User Input, from SW1 on the board
+; Tested - OK
 iob_user_inp:
+            ; set input to Bank-B, saving the current state
+            LDA shdw_regb
+            ORI 01H         ; set Bank-Select to Bank-1
+            OUT REG_B
+            ; Read PortA - cache the value as well.
             IN REG_A
+            STA shdw_rega   ; local cache
+            ; restore PortB settings
+            LDA shdw_regb
+            OUT REG_B
+            LDA shdw_rega   ; return w/ value in Reg-A
             RET
             
-            ; shadow registers for the higher level information being 
-            ; sent to each display. decimal-point state is boolean,
-            ; true := On.
-            ; Note: bit-3 is set or cleared which reduces rotate operations 
-            ;       when the bit is being used in higher level calls
-disp_dp_r:  db 00h          ; dp - right display [bool]
-disp_dp_l:  db 00h          ; dp - left display [bool]
-
-iob_user_disp_raw:
-            ; low level nibble operations on the 7-seg. display registers.
-            ; all operations on the 7-seg display are done through PortB.
-            ; reg-A - b[3..0] raw nibble (LD[3..0]) - high nibble ignored.
-            ; reg-B - b[1,0] 2-bit nibble register address (LS[1,0]). b[7..2] ignored.
-            ; AFFECTS: A,B,C,H,L
-            ; (!) THIS WILL ALSO WRITE THE dp (decimal-place) digit!
-            ; -
-            ; PortB
-            ; +---+---+---+---+---+---+---+---+
-            ; | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
-            ; +---+---+---+---+---+---+---+---+
-            ; |LD3|LD2|LD1|LD0|LS1|LS0|/LD|xxx|
-            ; +---+---+---+---+---+---+---+---+
-            ; Write back bit-0 as found in the shadow reg, used for read reg. select.
-            ; LD[3..0] raw LED nibble value (reg-A)
-            ; LS[1,0]  LED register select  (reg-B)
-            ; /LD      pulse LOW to write the new value
-            ; -
+            
             ; --- 7-seg led addressing --------
             ; Reg-B : LS[1,0]
             ; Reg-A : LD[3-0]
@@ -170,94 +279,153 @@ iob_user_disp_raw:
             ;  +-----+   . p (d.p.)
             ;     e
             ;
-            ; ==================================
-            ; do some initial bit testing to see if a dp shadow register
-            ; needs to be updated.
-            PUSH PSW        ; PUSH A,B,C,H,L + STATUS onto stack
-            PUSH B          
+            ; ---------------------------------
+            
+            
+            ; Ver 2 of the low level display controller. The workflow
+            ; for this version is to:
+            ; a) update the shadow registers as needed (raw values & d.p. settings)
+            ; b) call iob_disp_refresh() to write back all 4 of the shadow
+            ;    registers to the I/O Steering Control board in one 
+            ;    "refresh" operation.
+            ; In this way, raw segment values and d.p status changes can
+            ; be independantly performed without interferring with one
+            ; another and be 'orthoganol' in operation.
+            ; (!) Shadow Registers hold the LD[3-0] nibble contents only!
+            ;     The registers do not represent a raw value for PortB.
+            ; +---+---+---+---+---+---+---+---+
+            ; | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
+            ; +---+---+---+---+---+---+---+---+
+            ; | 0 | 0 | 0 | 0 |LD3|LD2|LD1|LD0|
+            ; +---+---+---+---+---+---+---+---+
+disp_shd_l_abcd: db 00h
+disp_shd_l_efgp: db 00h     ; has a d.p. (left)
+disp_shd_r_abcd: db 00h
+disp_shd_r_efgp: db 00h     ; has a d.p. (right)
+
+; Refresh both 7-Seg LED displays from local nibble cache: disp_shd_*_*
+; Tested - OK
+iob_disp_refresh:            
+            ; Low level operation to refresh the 2 7-segment displays by
+            ; copying all 4 shadow regsters to the nibble latches on the 
+            ; board.
+            ; input: none.
+            ; returns: none.
+            ; affects: A,B,C,D,H,L
+            ; Note: 7-seg nibble registers are updated in reverse, starting at '11'b
+            ;       to make the loop more efficient.
+            ; Note: All operations on the 7-seg display are done through PortB.
+            ; -
+            ; PortB
+            ; +---+---+---+---+---+---+---+---+
+            ; | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
+            ; +---+---+---+---+---+---+---+---+
+            ; |LD3|LD2|LD1|LD0|LS1|LS0|/LD|xxx|
+            ; +---+---+---+---+---+---+---+---+
+            ; Write back bit-0 as found in the shadow reg, used for read reg. select.
+            ; LD[3..0] raw LED nibble value (reg-A)
+            ; LS[1,0]  LED register select  (reg-B)
+            ; /LD      pulse LOW to write the new value
+            ; =================================
+            PUSH PSW        ; PUSH A,[B,C],[D,E],[H,L] + STATUS onto stack
+            PUSH B
+            PUSH D
             PUSH H
-            ANI 0Fh         ; only preserve lower nibble in Reg A
-            MOV C,A         ; copy A -> C : stash raw-reg into 'C' for now
-            MOV A,B         ; copy B -> A
-            ANI 01h         ; look at LS0
-            CPI 01h         ; A == 0x01? check Z-flag, it is SET when equal
-            JNZ udr2        ; skip if the raw value does not hold a dp bit. (Reg-B : '00'b or '10'b)
-            MOV A,B         ; copy B -> A
-            ANI 02h         ; look at LS1 (determine which dp to update)
-            CPI 02h         ; A == 0x02? check Z-flag, it is SET when equal
-            JNZ udr0        ; jump if not equal... LS1 = '0'b so it is the left dp that is to be updated.
-            ; updating the right dp state
-            LXI H,disp_dp_r ; will change this RAM "shadow register" (right led dp state)
-            JMP udr1        ; do the operation...
-udr0:       ; updating the left dp state
-            LXI H,disp_dp_l ; will change this RAM "shadow register" (left led dp state)
-udr1:       ; perform the dp update operation for the selected side (save reg addr already in H)
-            MOV A,C         ; copy C -> A - reload the raw binay value
-            ANI 08h         ; mask out all except the dp bit, b[3]
-            MOV M,A         ; save it back to the shadow register, leave the bit shifted for convenience.
-            ; -- Main Operation - save nibble to the correct LED register --------------
-udr2:       MOV A,C         ; copy C -> A : restore Acc value (raw nibble) for further work.
+            MVI D,00h       ; setup jump table... DE <- 0x0003
+            MVI E,03h       ; use E to count the loop (for B = 3 ; B >= 0 ; B--) part of 16-bit DE reg.
+idrf0:      LXI H,disp_shd_l_abcd
+            DAD D           ; ...math. HL <- HL + DE, see for-loop in notes above
+            MOV A,M         ; Read shadow-reg nibble from addr. 'M' (HL reg) -> A
             RLC
             RLC
             RLC
-            RLC             ; rot A left by 4 bits
+            RLC             ; rot A left by 4 bits. sets up LD[3-0] value
             ANI 0F0h        ; clear out the lower 4 bits, not used.
-            MOV C,A         ; A -> C : stash into 'C' for now
-            MOV A,B         ; B -> A : LED reg. select bits
-            ANI 03h         ; clear all but lowest 2 bits
+            MOV C,A         ; C <- A stash A. Need A for futher logic operations, data will be OR'd into C as a new working reg.
+            MOV A,E         ; E -> A : LED reg. select bits
             RLC
             RLC             ; shift left 2 bits
             ORA C           ; A <- A OR C : combined LED raw value and the register address
-            MOV C,A         ; A -> C : stash into 'C' for now
-            LXI H,shdw_regc ; get 16-bit address of PortC shadow reg. Use 'M' for copy operations on this address
-            MOV A,M         ; A <- (shdw_regc) : load shadow value -> 'A'
-            ANI 01h         ; clear out all but leave bit 0 preserved
-            ORA C           ; A <- A OR C : all is combined now with b0 preserved and b1 "/LD" is '0'!
-            MOV M,A         ; (shdw_regc) <- A : save the shadow value, with /LD at '0' (does not matter)
-            XRI 02h         ; flip /LD bit to '1' before write
-            OUT REG_C       ; and write out to PortC (/LD de-asserted)
+            MOV C,A         ; A -> C : stash into 'C' now has shifted LD[3-0] | LS[1,0]
+            LDA shdw_regb   ; load shadow_reg-PortB -> A
+            ANI 01h         ; only save the SI1/SI2 input selector current state. set /LOAD to '0' !
+            ORA C           ; A <- A OR C : combines the LED_DATA, LED_SEL and SI1/SI2 with /LOAD set to '0'b
+            ; Perform the PortB write sequence for latching value into 4-bit nibble latch
+            XRI 02h         ; A : flip /LD bit to '1' before write
+            OUT REG_B       ; and write out to PortB (/LD de-asserted)
             XRI 02h         ; clear /LD bit to '0' by flipping it again, to latch the value
-            OUT REG_C       ; and write out to PortC w/ /LD set
+            OUT REG_B       ; and write out to PortB w/ /LD set
             XRI 02h         ; flip /LD bit to '1' before write
-            OUT REG_C       ; one final write to de-assert /LD again
-            POP H
+            OUT REG_B       ; one final write to de-assert /LD again
+            STA shdw_regb   ; (shdw_regb) <- A - save latest PortB write back to the shadow reg.
+            DCR E           ; E <- E - 1
+            JP  idrf0       ; loop if E >= 0. When E=0 and is decremented, value becomes 
+                            ; negative (FFh) so Sign 'S' bit in status is set (negative 
+                            ; result). JP := Jump-if-positive-result
+            POP H           ; restore saved registers.
+            POP D
             POP B
-            POP PSW         ; Restore A,B,C,H,L + STATUS
-            RET             ; Done.
+            POP PSW
+            RET             ; return()
 
+            
+; common code used with D.P Manipulation functions
+iob_user_dpm_common:
+            CPI 00h         ; A == 0? if not then set A to 0x08 and write either value.
+            JZ  iobudpc0       ; A = False  (clear D.P.)
+            MOV A, M        ; A = True   (set D.P)
+            ORI 08H         ; set bit
+            JMP iobudpc1
+iobudpc0:   MOV A, M
+            ANI 0F7H        ; clear bit-3
+iobudpc1:   MOV M, A        ; save shadow reg.
+            POP H
+            ;CALL iob_disp_refresh ; update the displays
+            RET
+
+
+; disp_shd_l_efgp, disp_shd_r_efgp : bit-7 (0x80)
+; Tested - OK
 iob_user_disp_dpl:
             ; affect the left decimal-point "dot" on the 7-seg display.
             ; does not change any other data on the display.
             ; turn on or off, based on binary state of reg-A, true:=On
-            CPI 00h         ; A == 0? if not then set A to 0x08 and write either value.
-            JZ  uddl0
-            MVI A,08h       ; set b3 corresponding to the correct bit-lane for the dp bit in the (high) 4-bit register
-uddl0:      ; write the result to the shadow register
-            STA disp_dp_l
-            RET
+            PUSH H
+            LXI H, disp_shd_l_efgp
+            JMP iob_user_dpm_common ; remaining ops done in common code
             
+; Tested - OK
 iob_user_disp_dpr:
             ; affect the right decimal-point "dot" on the 7-seg display.
             ; does not change any other data on the display.
             ; turn on or off, based on binary state of reg-A, true:=On
-            CPI 00h         ; A == 0? if not then set A to 0x08 and write either value.
-            JZ  uddr0
-            MVI A,08h       ; set b3 corresponding to the correct bit-lane for the dp bit in the (high) 4-bit register
-uddr0:      ; write the result to the shadow register
-            STA disp_dp_r
-            RET
+            PUSH H
+            LXI H, disp_shd_r_efgp
+            JMP iob_user_dpm_common ; remaining ops done in common code
 
-r_iob_user_disp_dpl:
-            ; read back the right 7-seg display decimal-point. reg-A
-            ; is true if the d.p is currently On (lit).
-            LDA disp_dp_l
+
+; common code used with D.P Read functions
+riob_user_dpm_common:
+            MOV A, M
+            ANI 08H         ; clear all but bit 3
+            CPI 00h         ; A == 0? 
+            JZ  riobudpc0   ; Yes.
+            LDA 01H         ; No.
+riobudpc0:  POP H
             RET
             
+; Tested - OK
+r_iob_user_disp_dpl:
+            PUSH H
+            LXI H, disp_shd_l_efgp
+            JMP riob_user_dpm_common
+
+; Tested - OK
 r_iob_user_disp_dpr:
-            ; read back the left 7-seg display decimal-point. reg-A
-            ; is true if the d.p is currently On (lit).
-            LDA disp_dp_r
-            RET
+            PUSH H
+            LXI H, disp_shd_r_efgp
+            JMP riob_user_dpm_common
+
 
 led_7seg_lut:
             ; 7-seg ASCII-HEX to Raw conversion Look up Table
@@ -267,7 +435,7 @@ led_7seg_lut:
             ;       when appropriate.
             ; b[7..4] segment order: dp,g,f,e   (LS0 := 1)
             ; b[3..0] segment order: d,c,b,a    (LS1 := 0)
-
+; Tested - OK
 iob_user_disp_hexnib:
             ; write a hex-nibble value to the left or right 7-seg LED.
             ; A contains the ASCII-HEX value to write in b[3..0], b[7..4] is IGNORED
@@ -277,58 +445,43 @@ iob_user_disp_hexnib:
             PUSH PSW        ; PUSH A,B,C,H,L + STATUS onto stack
             PUSH B          
             PUSH H
-            LXI M,led_7seg_lut ; setup the LUT
+            LXI H,led_7seg_lut ; setup the LUT
             ANI 0Fh         ; only low nibble needed
             MOV E,A
-            MOV D,00h       ; setup jump table...
-            DAD D           ; ...math
-            MOV A,M         ; grab the high.low raw segment values -> A
-            MOV C,A         ; cache value into C
-            ; left or right display?
-            MOV A,B         ; copy B -> A
-            CPI 00h         ; B == 0 ?  (0 := left disp.)
-            JZ udhn0
-            ; right disp.
-            LDA disp_dp_r   ; A <- right disp. dp state (shadowed) (0 | 0x8)
+            MVI D,00h       ; setup jump table...
+            DAD D           ; HL <- HL + DE
+            MOV A,M         ; A <- (HL) grab the high.low raw segment values -> A
+            MOV C,A         ; cache LUT value
+            ANI 0FH
+            MOV L,A
+            MOV A,C
+            ANI 0F0H
+            RRC
+            RRC
+            RRC
+            RRC
+            MOV H,A         ; HL := [0000pgfc][0000dcba] (!) get the cached d.p!
+            ; decide which raw register to save to...
+            MOV A,B
+            CPI 00H         ; B == 0 ?
+            JZ  udhn0      ; Yes. (Left)
+            LDA disp_shd_r_efgp ; No. (Right) - get the D.P
+            ANI 08H
+            ORA H           ; A <- H || ('0000p000'b) D.P from cache
+            MOV H,A
+            SHLD disp_shd_r_abcd  ; right (16-bit) <- HL (!) writes 2 bytes, only b[3..0] used in each byte.
             JMP udhn1
-            ; left disp.
-udhn0:      LDA disp_dp_l   ; A <- left disp. dp state (shadowed) (0 | 0x8)
-udhn1:      RLC             ; common combo math for integrating dp
-            RLC
-            RLC
-            RLC             ; rot A left by 4 bits, get dp bit up to msb
-            ANI 80h         ; make sure only msb can be set
-            ANA C           ; A <- A AND C
-            ; Reg A now contains the upper and lower 7-seg nibbles with 
-            ; the correct current state of the dp on that display.
-            MOV C,A         ; cache value into C
-            MOV A,B         ; copy B -> A
-            RLC
-            ANI 02h         ; adjust display selector to become LS1 bit. Will now be '00'b or '10'b
-            MOV B,A         ; put back into B
-            MOV A,C         ; Restore Reg A
-            ; write the low nibble
-            CALL iob_user_disp_raw
-            ; Note: Above call saves any registers that it will modify during operation.
-            ;       As the registers are pop'd back, prior to return, their contents will
-            ;       match the values in them when the subroutine was first called.
-            MOV C,A         ; cache value into C
-            MOV A,B         ; copy B -> A
-            ORI 01h         ; set low bit to chenge to the high order nibble
-            MOV B,A         ; put back into B
-            MOV A,C         ; Restore Reg A
-            RRC
-            RRC
-            RRC
-            RRC             ; shift down the upper nibble
-            ; write the high nibble
-            CALL iob_user_disp_raw
-            ; we are done, restore registers that we messed with.
-            POP H
+udhn0:      LDA disp_shd_l_efgp ; get the D.P
+            ANI 08H
+            ORA H           ; A <- H || ('0000p000'b) D.P from cache
+            MOV H,A
+            SHLD disp_shd_l_abcd
+udhn1:      POP H
             POP B
             POP PSW         ; Restore A,B,C,H,L + STATUS
             RET
 
+; Tested - OK
 iob_user_disp_hexbyt:
             ; Uses the above calls to create the highest abstraction 
             ; level of use in the 7Seg displays in order to generate 
@@ -336,4 +489,18 @@ iob_user_disp_hexbyt:
             ; 0x00 to 0xff in value (reg-A).
             ; Left and right decimal points are controlled by a 
             ; separate call.
+            MOV C,A         ; cache Reg-A
+            MVI B,01H       ; setup for the right disp, LSB
+            CALL iob_user_disp_hexnib
+            MOV A,C
+            RRC
+            RRC
+            RRC
+            RRC
+            MVI B,00H       ; setup for the left disp, MSB
+            CALL iob_user_disp_hexnib
+            ; Update the display
+            CALL iob_disp_refresh
+            RET
+            
 
